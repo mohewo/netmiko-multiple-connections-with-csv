@@ -1,13 +1,9 @@
 import csv
 import datetime as dt
 from logging import DEBUG
-from logging import Formatter
-from logging import getLogger
-from logging import StreamHandler
+from logging import Formatter, getLogger, StreamHandler, FileHandler
 import os
-from typing import Callable
-from typing import Dict
-from typing import List
+from typing import Callable, Dict, List
 
 import netmiko
 from netmiko.ssh_autodetect import SSHDetect
@@ -45,126 +41,149 @@ class CSVOperator:
 
 class NetmikoOperator:
 
-    def __init__(self) -> None:
-        self.logger = self.setup_logger()
+    def __init__(self, host: Dict, commands: List, logdir: str) -> None:
+        self.make_timeinfo()
+
+        self.host = host
+        self.hostname = host["host"]
+        self.username = host["username"]
+        self.password = host["password"]
+        self.secret = host["secret"]
+        self.commands = commands
+        self.res = {}
+
+        self.logdir = logdir
+        file_prefix = f"{self.logdir}/{self.hostname}-{self.timeinfo}-JST"
+        self.loggingfile = f"{file_prefix}-logging.log"
+        self.outputfile = f"{file_prefix}.log"
+        self.setup_logger()
+
+    def make_timeinfo(self) -> Callable:
+        self.timeinfo = dt.datetime.now(dt.timezone(dt.timedelta(hours=9))).strftime('%Y%m%d-%H%M%S')
 
     def setup_logger(self) -> Callable:
-        logger = getLogger(__name__)
-        logger.setLevel(DEBUG)
+        self.logger = getLogger(__name__)
+        self.logger.setLevel(DEBUG)
 
-        sh = StreamHandler()
-        sh.setLevel(DEBUG)
-        sh_formatter = Formatter(
+        log_formatter = Formatter(
             '%(asctime)s - %(levelname)s - %(funcName)s - %(message)s',
             '%Y-%m-%d %H:%M:%S')
-        sh.setFormatter(sh_formatter)
 
-        logger.addHandler(sh)
-        logger.propagate = False
-        return logger
+        std_err = StreamHandler()
+        std_err.setFormatter(log_formatter)
 
-    def connect_autodetect(self, hostinfo: Dict[str, str], loginfo: str) -> Callable:
+        fs_err = FileHandler(self.loggingfile)
+        fs_err.setFormatter(log_formatter)
+
+        self.logger.addHandler(std_err)
+        self.logger.addHandler(fs_err)
+        self.logger.propagate = False
+
+    def connect_autodetect(self) -> Callable:
         remote_device = {'device_type': 'autodetect',
-                         'host': hostinfo.get("host"),
-                         'username': hostinfo.get("username"),
-                         'password': hostinfo.get("password"),
-                         'secret': hostinfo.get("secret"),
-                         'session_log': loginfo}
-        detector = SSHDetect(**remote_device)
-        remote_device['device_type'] = detector.autodetect()
-        connection = ConnectHandler(**remote_device)
-        return connection
-
-    def make_logdir(self, timeinfo: str) -> str:
-        logdir = f'log-{timeinfo}'
-        netutil.ensure_dir_exists(logdir)
-        return logdir
-
-    def make_loginfo(self, timeinfo: str, **hinfo) -> str:
-        dir = self.make_logdir(timeinfo)
-        loginfo = f'{dir}/{hinfo.get("host")}-{timeinfo}-JST.log'
-        return loginfo
+                         'host': self.hostname,
+                         'username': self.username,
+                         'password': self.password,
+                         'secret': self.secret,
+                         'session_log': self.outputfile
+                         }
+        remote_device['device_type'] = SSHDetect(**remote_device).autodetect()
+        self.connection = ConnectHandler(**remote_device)
 
     def rename_logfile(self, key: str, loginfo: str) -> None:
         loginfo_renamed = loginfo.rstrip('.log') + f'-{key}.log'
         os.rename(loginfo, loginfo_renamed)
 
-    def ping_check(self, host: str) -> None:
+    def ping_check(self) -> None:
         try:
-            ping.ping(host, timeout=0.5)
+            ping.ping(self.host, timeout=0.5)
 
         except ping.errors.Timeout:
             error_msg = 'PingTimeout'
-            self.logger.error(f'{error_msg}: {host}')
+            self.logger.error(f'{error_msg}: {self.host}')
 
         except ping.errors.TimeToLiveExpired:
             error_msg = 'PingTTLExpired'
-            self.logger.error(f'{error_msg}: {host}')
+            self.logger.error(f'{error_msg}: {self.host}')
 
         except ping.errors.PingError:
             error_msg = 'PingUnreachable'
-            self.logger.error(f'{error_msg}: {host}')
+            self.logger.error(f'{error_msg}: {self.host}')
 
         except PermissionError:
             error_msg = 'PermissionError; OS requires root permission to send ICMP packets'
             self.logger.error(f'{error_msg}')
 
         except Exception as e:
-            self.logger.error(f'Error: {host}')
+            self.logger.error(f'Error: {self.host}')
             self.logger.debug(e)
 
         else:
             success_msg = 'PingSuccess'
-            self.logger.info(f'{success_msg}: {host}')
+            self.logger.info(f'{success_msg}: {self.host}')
 
     def wrapper_except_proccess(self, host: str, error_msg: str, loginfo: str) -> None:
         self.ping_check(host)
         self.logger.error(f'{error_msg}: {host}\n')
         self.rename_logfile(error_msg, loginfo)
 
-    def multi_send_command(self, conn: Callable, commandlist: List[List[str]]) -> str:
-        conn.enable()
-        for command in commandlist:
-            print(f'{"="*30} {command[0]} @{conn.host} {"="*30}')
-            output = ''
-            output += conn.send_command(command[0], strip_prompt=False, strip_command=False) + '\n'
-            print(output)
-            print(f'{"="*80}\n')
+    def single_send_command(self, command) -> str:
+        self.connection.enable()
+        print(f'{"="*30} {command} @{self.host} {"="*30}')
+        output = self.connection.send_command(command, strip_prompt=False, strip_command=False) + '\n'
+        self.res[command] = output
+        print(output)
+        print(f'{"="*80}\n')
         return output
 
-    def multi_connections(self, hostlist: List[Dict[str, str]], commandlist: List[List[str]]) -> None:
-        dt_now = dt.datetime.now(dt.timezone(dt.timedelta(hours=9)))
-        dt_now = dt_now.strftime('%Y%m%d-%H%M%S')
+    def multi_send_command(self) -> str:
+        output = ""
+        for command in self.commands:
+            output += self.single_send_command(command)
+        return output
 
-        for hinfo in hostlist:
-            loginfo = self.make_loginfo(dt_now, **hinfo)
-            host = hinfo.get("host")
+    def exec_command(self):
+        try:
+            self.connect_autodetect()
+            output = self.multi_send_command()
 
-            try:
-                conn = self.connect_autodetect(hinfo, loginfo)
-                self.multi_send_command(conn, commandlist)
-                conn.disconnect()
+        except netmiko.NetMikoAuthenticationException:
+            error_msg = 'SSHAuthenticationError'
+            self.wrapper_except_proccess(self.host, error_msg, self.outputfile)
 
-            except netmiko.NetMikoAuthenticationException:
-                error_msg = 'SSHAuthenticationError'
-                self.wrapper_except_proccess(host, error_msg, loginfo)
+        except netmiko.NetMikoTimeoutException:
+            error_msg = 'SSHTimeoutError'
+            self.wrapper_except_proccess(self.host, error_msg, self.outputfile)
 
-            except netmiko.NetMikoTimeoutException:
-                error_msg = 'SSHTimeoutError'
-                self.wrapper_except_proccess(host, error_msg, loginfo)
+        except netmiko.ReadTimeout:
+            error_msg = 'ReadTimeout or CommandMismatch'
+            self.wrapper_except_proccess(self.host, error_msg, self.outputfile)
 
-            except netmiko.ReadTimeout:
-                error_msg = 'ReadTimeout or CommandMismatch'
-                self.wrapper_except_proccess(host, error_msg, loginfo)
+        except Exception as e:
+            error_msg = 'Error'
+            self.wrapper_except_proccess(self.host, error_msg, self.outputfile)
+            self.logger.error(e)
 
-            except Exception as e:
-                error_msg = 'Error'
-                self.wrapper_except_proccess(host, error_msg, loginfo)
-                self.logger.error(e)
+        else:
+            success_msg = 'SuccessfullyDone'
+            self.logger.info(f'{success_msg}: {self.host}\n')
+            return output
 
-            else:
-                success_msg = 'SuccessfullyDone'
-                self.logger.info(f'{success_msg}: {host}\n')
+    def close(self):
+        self.connection.disconnect()
+
+
+def multi_connections(hlists, clist) -> None:
+    timeinfo = dt.datetime.now(dt.timezone(dt.timedelta(hours=9))).strftime('%Y%m%d-%H%M%S')
+    logdir = f'log-{timeinfo}'
+    netutil.ensure_dir_exists(logdir)
+
+    session = {}
+
+    for hinfo in hlists:
+        session[hinfo["host"]] = NetmikoOperator(hinfo, clist, logdir)
+        session[hinfo["host"]].exec_command()
+        session[hinfo["host"]].close()
 
 
 def main():
@@ -172,8 +191,7 @@ def main():
     hlist = csv_ope.read_hostlist()
     clist = csv_ope.read_commandlist()
 
-    netmiko_ope = NetmikoOperator()
-    netmiko_ope.multi_connections(hlist, clist)
+    multi_connections(hlist, clist)
 
 
 if __name__ == '__main__':
