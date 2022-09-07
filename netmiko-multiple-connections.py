@@ -16,19 +16,12 @@ from netmiko import utilities as netutil
 
 import ping3 as ping
 
-
-HOSTLIST = 'hostlist.csv'
-COMMANDLIST = 'commandlist.csv'
-
 ping.EXCEPTIONS = True
 
 
 class CSVOperator:
 
-    def read_hostlist(self, csv_file: str = None) -> List[Dict[str, str]]:
-        if not csv_file:
-            csv_file = HOSTLIST
-
+    def read_hostlist(self, csv_file: str = "hostlist.csv") -> List[Dict[str, str]]:
         try:
             with open(csv_file, 'r') as f:
                 hostdict = csv.DictReader(f)
@@ -38,10 +31,7 @@ class CSVOperator:
         except IOError:
             print(f'I/O error: {csv_file}\n')
 
-    def read_commandlist(self, csv_file: str = None) -> List[List[str]]:
-        if not csv_file:
-            csv_file = COMMANDLIST
-
+    def read_commandlist(self, csv_file: str = "commandlist.csv") -> List[List[str]]:
         try:
             with open(csv_file, 'r') as f:
                 csv_reader = csv.reader(f)
